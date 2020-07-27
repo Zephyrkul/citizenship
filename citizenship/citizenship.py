@@ -540,8 +540,12 @@ class Citizenship(commands.Cog):
             key = (await self.bot.get_shared_api_tokens("google_sheets")).get("api_key", None)
             if not key:
                 self.waiting_for = self.bot.loop.create_future()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self.waiting_for
+                try:
+                    await asyncio.shield(self.waiting_for)
+                except asyncio.CancelledError:
+                    if not self.waiting_for.cancelled():
+                        self.waiting_for.cancel()
+                        raise
                 self.waiting_for = None
                 continue
 
@@ -581,8 +585,12 @@ class Citizenship(commands.Cog):
                 timetil += PERIOD
             wakeupat = t + timedelta(seconds=timetil)
             self.waiting_for = asyncio.ensure_future(asyncio.sleep(timetil))
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.waiting_for
+            try:
+                await asyncio.shield(self.waiting_for)
+            except asyncio.CancelledError:
+                if not self.waiting_for.cancelled():
+                    self.waiting_for.cancel()
+                    raise
             del wakeupat
 
     async def _task_region(self, session, localcache, _):
