@@ -730,7 +730,7 @@ class Citizenship(commands.Cog):
         to_remove = member_roles - roles
         if to_add or to_remove:
             LOG.info(
-                "\n%s\nTo add: %s\nTo remove: %s\n\n",
+                "\n\n%s\nTo add: %s\nTo remove: %s",
                 member,
                 humanize_list([r.name for r in to_add]) if to_add else None,
                 humanize_list([r.name for r in to_remove]) if to_remove else None,
