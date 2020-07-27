@@ -534,19 +534,26 @@ class Citizenship(commands.Cog):
                 if to_add:
                     await member.add_roles(*to_add, reason=f"Set nation to {nation}")
 
+    async def _wait_for(self, coro=None):
+        if coro:
+            self.waiting_for = asyncio.ensure_future(coro)
+        else:
+            self.waiting_for = self.bot.loop.create_future()
+        try:
+            await asyncio.shield(self.waiting_for)
+        except asyncio.CancelledError:
+            if not self.waiting_for.cancelled():
+                # we were cancelled
+                self.waiting_for.cancel()
+                raise
+        self.waiting_for = None
+
     async def _task(self):
         while self is self.bot.get_cog(self.__class__.__name__):
             localcache = {"ALL": {"ex-nation"}}
             key = (await self.bot.get_shared_api_tokens("google_sheets")).get("api_key", None)
             if not key:
-                self.waiting_for = self.bot.loop.create_future()
-                try:
-                    await asyncio.shield(self.waiting_for)
-                except asyncio.CancelledError:
-                    if not self.waiting_for.cancelled():
-                        self.waiting_for.cancel()
-                        raise
-                self.waiting_for = None
+                await self._wait_for()
                 continue
 
             # get new cache by abusing dict mutability
@@ -584,13 +591,7 @@ class Citizenship(commands.Cog):
             if timetil < PERIOD / 4:
                 timetil += PERIOD
             wakeupat = t + timedelta(seconds=timetil)
-            self.waiting_for = asyncio.ensure_future(asyncio.sleep(timetil))
-            try:
-                await asyncio.shield(self.waiting_for)
-            except asyncio.CancelledError:
-                if not self.waiting_for.cancelled():
-                    self.waiting_for.cancel()
-                    raise
+            await self._wait_for(asyncio.sleep(timetil))
             del wakeupat
 
     async def _task_region(self, session, localcache, _):
