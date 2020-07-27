@@ -224,6 +224,8 @@ class Citizenship(commands.Cog):
                 return
             if len(author.roles) == 1:
                 continue
+            if author.id in self.nations:
+                continue
             user_guesses.setdefault(author, set())
             if message.content.startswith(prefix):
                 guess = nid(message.content[len(prefix) :])
