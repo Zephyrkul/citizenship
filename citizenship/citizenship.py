@@ -127,7 +127,7 @@ class Citizenship(commands.Cog):
     def __init__(self, bot: Red):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=2113674295, force_registration=True)
-        self.config.register_guild(on=False, roles={})
+        self.config.register_guild(on=False)
         self.config.register_user(nation=None)
         self.nations = Cached(self.config)
         self.cache: Dict[str, Set[str]] = {}
@@ -201,7 +201,8 @@ class Citizenship(commands.Cog):
                 servers_data = json.load(file)
         except Exception as e:
             return await ctx.author.send(
-                f"I couldn't load your data due to an error:\n`{e.__class__.__name__}:{' '.join(e.args)}``"
+                "I couldn't load your data due to an error:\n"
+                f"`{e.__class__.__name__}:{' '.join(map(str, e.args))}``"
             )
         nations_data = servers_data.pop("nations")
         settings_data = servers_data.pop("settings")
@@ -739,12 +740,4 @@ class Citizenship(commands.Cog):
         member_roles = set(member.roles)
         to_add = roles - member_roles
         to_remove = member_roles - roles
-        if to_add or to_remove:
-            LOG.info(
-                "\n\n%s\nTo add: %s\nTo remove: %s",
-                member,
-                humanize_list([r.name for r in to_add]) if to_add else None,
-                humanize_list([r.name for r in to_remove]) if to_remove else None,
-            )
-        return [], []
-        # return to_add, to_remove
+        return to_add, to_remove
