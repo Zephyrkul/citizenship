@@ -468,7 +468,7 @@ class Citizenship(commands.Cog):
         if sid not in servers:
             return
         channel = self.bot.get_channel(
-            (147373859736256512, 736372226831679499)[servers.index(sid)]
+            (641847054477295629, 736372226831679499)[servers.index(sid)]
         )
         if not channel or not channel.permissions_for(member).send_messages:
             return
