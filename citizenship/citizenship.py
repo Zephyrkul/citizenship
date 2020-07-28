@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from multidict import MultiDict
 from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
 from redbot.core.commands import Context
-from redbot.core.utils.chat_formatting import box, pagify, humanize_list, humanize_timedelta
+from redbot.core.utils.chat_formatting import box, humanize_list, humanize_timedelta, pagify
 from sans.api import Api
 
 PERIOD = 43200
@@ -180,76 +181,46 @@ class Citizenship(commands.Cog):
     async def maybe_fetch(self, user_id: int):
         return self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
 
+    async def red_get_data_for_user(self, *, user_id):
+        nation = self.nations.get(user_id)
+        if not nation:
+            return {}
+        bytesio = io.BytesIO()
+        cached = self.cache.get(nation)
+        if not cached:
+            bytesio.write(bytes(f"Your nation is {rnid(nation)}.", encoding="utf-8"))
+        else:
+            bytesio.write(
+                bytes(
+                    f"Your nation is {rnid(nation)}, "
+                    "and it has the following positions relating to The North Pacific:\n"
+                    f"{humanize_list(self.cache[nation])}.",
+                    encoding="utf-8",
+                )
+            )
+        return {"nation.txt", bytesio}
+
+    async def red_delete_data_for_user(self, *, requester, user_id):
+        if requester not in ("discord_deleted_user", "owner", "user", "user_strict"):
+            LOG.warning(f"Unknown requester type {requester}")
+            return
+        async with self.nations:
+            self.nations.pop(user_id, None)
+        cache = self.cache["ALL"]
+        for guild in self.enabled_guilds:
+            if member := guild.get_member(user_id):
+                with contextlib.suppress(discord.Forbidden):
+                    await member.remove_roles(
+                        *(r for r in guild.roles if r.name.lower() in cache),
+                        reason=f"Data deletion request for {self.__class__.__name__} cog",
+                    )
+
     @commands.group(invoke_without_command=True, autohelp=False)
     async def identify(self, ctx: Context, *, nation=None):
         """Configure or view the nations associated with yourself or others."""
         if ctx.invoked_subcommand is None and nation is None:
             return await ctx.send_help()
         await ctx.invoke(self._identify_nation, nation=nation)
-
-    @identify.command(name="import")
-    @checks.is_owner()
-    async def _identify_import(self, ctx: Context, *, path: str):
-        """
-        Import data from V2 and help catch up from V2's downtime.
-
-        <path> should be a direct path to citizenships data.json.
-        This is most likely <V2 installation path>/data/citizenship/data.json.
-        """
-        try:
-            with open(path) as file:
-                servers_data = json.load(file)
-        except Exception as e:
-            return await ctx.author.send(
-                "I couldn't load your data due to an error:\n"
-                f"`{e.__class__.__name__}:{' '.join(map(str, e.args))}``"
-            )
-        nations_data = servers_data.pop("nations")
-        settings_data = servers_data.pop("settings")
-        await ctx.bot.set_shared_api_tokens("google_sheets", api_key=settings_data["KEY"])
-        for server_id, settings in servers_data.items():
-            await self.config.guild_from_id(int(server_id)).on.set(settings["on"])
-        async with self.nations:
-            for nation, user_id in nations_data.items():
-                self.nations.setdefault(int(user_id), nation)
-
-        user_guesses: Dict[discord.Member, Set[Tuple[discord.Message, str]]] = {}
-        prefix = "!nation "
-        async for message in ctx.bot.get_channel(641847054477295629).history(
-            after=discord.Object(id=LAST_MAGICALITY_SNOWFLAKE), limit=None
-        ):
-            author = message.guild.get_member(message.author)
-            if not author or author.bot:
-                continue
-            if author.joined_at < discord.utils.snowflake_time(LAST_MAGICALITY_SNOWFLAKE):
-                return
-            if len(author.roles) == 1:
-                continue
-            if author.id in self.nations:
-                continue
-            user_guesses.setdefault(author, set())
-            if message.content.startswith(prefix):
-                guess = nid(message.content[len(prefix) :])
-                if guess:
-                    user_guesses[author].add((message, guess))
-        user_guesses_message = []
-        for k, v in user_guesses.items():
-            if v:
-                l = [f"[{rnid(n)}]({m.jump_url})" for m, n in v]
-                s = humanize_list(l)
-            else:
-                s = "*No nations found.*"
-            user_guesses_message.append(f"{k.mention}: {s}")
-        embed = discord.Embed(
-            color=await ctx.embed_color(), description="\n".join(user_guesses_message),
-        )
-        await ctx.send(
-            "Data imported.\n"
-            "The following users joined and were given roles after Magicality went down; "
-            "the following are my best guesses as to what nation they were registered with.\n"
-            "Multiple nations means they posted more than one nation.",
-            embed=embed,
-        )
 
     @identify.group(name="task", invoke_without_subcommand=True, autohelp=False)
     @checks.is_owner()
@@ -402,12 +373,14 @@ class Citizenship(commands.Cog):
             del self.nations[author.id]
         except KeyError:
             return await ctx.send("You have no nation associated with your account.")
-        try:
-            await self._add_roles(author)
-        except discord.Forbidden:
-            return await ctx.send(
-                "I couldn't modify your roles. Please ask an administrator to check my permissions."
-            )
+        cache = self.cache["ALL"]
+        for guild in self.enabled_guilds:
+            if member := guild.get_member(ctx.author.id):
+                with contextlib.suppress(discord.Forbidden):
+                    await member.remove_roles(
+                        *(r for r in guild.roles if r.name.lower() in cache),
+                        reason=f"Member removed identifying nation in {self.__class__.__name__} cog",
+                    )
         await ctx.send("Nation removed.")
 
     @identify.command(name="show", pass_context=True)
