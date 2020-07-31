@@ -8,7 +8,7 @@ import re
 import traceback
 from datetime import datetime, timedelta, timezone
 from itertools import repeat, starmap
-from typing import Dict, MutableMapping, Set, Tuple, Union
+from typing import Dict, List, MutableMapping, Optional, Set, Tuple, Union
 
 import aiohttp
 import discord
@@ -502,11 +502,9 @@ class Citizenship(commands.Cog):
         all_guilds = await self.config.all_guilds()
         for member in members:
             if member and all_guilds.get(member.guild.id, {}).get("on"):
-                to_add, to_remove = self._role_set(member)
-                if to_remove:
-                    await member.remove_roles(*to_remove, reason=f"Set nation to {nation}")
-                if to_add:
-                    await member.add_roles(*to_add, reason=f"Set nation to {nation}")
+                roles = self._role_set(member)
+                if roles:
+                    await member.edit(roles=roles, reason=f"Set nation to {nation}")
 
     async def _wait_for(self, coro=None):
         if coro:
@@ -688,29 +686,22 @@ class Citizenship(commands.Cog):
             for i, member in enumerate(
                 filter(lambda m: not m.bot and m.id in self.nations, server.members), 1
             ):
-                to_add, to_remove = self._role_set(member)
-                if to_remove:
-                    await member.remove_roles(
-                        *to_remove, reason=f"{self.__class__.__name__} autorole task"
+                roles = self._role_set(member)
+                if roles:
+                    await member.edit(
+                        roles=roles, reason=f"{self.__class__.__name__} autorole task"
                     )
-                if to_add:
-                    await member.add_roles(
-                        *to_add, reason=f"{self.__class__.__name__} autorole task"
-                    )
-                if not i % 5:
+                if not i % 10:
                     await asyncio.sleep(0.1)  # yield to other tasks
 
-    def _role_set(self, member) -> Tuple[Set[discord.Role], Set[discord.Role]]:
+    def _role_set(self, member) -> Optional[List[discord.Role]]:
         def torole(n):
             return next(filter(lambda r: r.name.lower() == n, member.guild.roles), None)
 
         alltitles = self.cache["ALL"]
-        base = filter(lambda role: role.name.lower() not in alltitles, member.roles)
-        roles = set(map(torole, self.cache.get(self.nations[member.id], ("ex-nation",)))).union(
-            base
-        )
+        base = set(filter(lambda role: role.name.lower() not in alltitles, member.roles))
+        roles = base.union(map(torole, self.cache.get(self.nations[member.id], ("ex-nation",))))
         roles.discard(None)
-        member_roles = set(member.roles)
-        to_add = roles - member_roles
-        to_remove = member_roles - roles
-        return to_add, to_remove
+        if roles ^ base:
+            return list(roles)
+        return None
