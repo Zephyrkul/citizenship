@@ -14,7 +14,7 @@ async def setup(bot):
     expected = "0.0.1b7"
     if sans.version_info != type(sans.version_info)(expected):
         raise CogLoadError(f"This cog requires sans version {expected}.")
-    if bot.user.id not in (488781401567526915, 256505473807679488):
+    if bot.user.id not in (743870009826083017, 488781401567526915, 256505473807679488):
         raise CogLoadError("I don't know how you found this cog, but it isn't meant for your bot.")
     cog = Citizenship(bot)
     await cog.initialize()

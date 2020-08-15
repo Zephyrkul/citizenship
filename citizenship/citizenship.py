@@ -14,7 +14,7 @@ import aiohttp
 import discord
 import sans
 from backoff import expo, on_exception
-from bidict import bidict
+from bidict import bidict, ValueDuplicationError
 from multidict import MultiDict
 from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
@@ -69,7 +69,18 @@ class Cached(MutableMapping):
     async def initialize(self):
         if self.data is not None:
             raise RuntimeError
-        self.data = bidict({k: v["nation"] for k, v in (await self.config.all_users()).items()})
+        all_users = await self.config.all_users()
+        self.data = bidict()
+        for user_id, data in all_users.items():
+            try:
+                self.data[user_id] = v["nation"]
+            except ValueDuplicationError:
+                LOG.warning(
+                    "User IDs %s and %s both have claimed nation %s; discarding the latter.",
+                    self.data.inv[v["nation"]],
+                    user_id,
+                    v["nation"],
+                )
 
     def __getitem__(self, item):
         return self.data[item]
@@ -77,18 +88,21 @@ class Cached(MutableMapping):
     async def __aenter__(self):
         if self._inv:
             raise RuntimeError
+        await self.config.get_users_lock().__aenter__()
         self._cm = set()
         return self
 
     async def __aexit__(self, *args):
-        cm, self._cm, data = self._cm, None, self.data.copy()
+        cm, self._cm = self._cm, None
         for key in cm:
-            if key not in data:
+            if key not in self.data:
                 await self.config.user_from_id(key).nation.clear()
             else:
                 await self.config.user_from_id(key).nation.set(self.data[key])
+        return await self.config.get_users_lock().__aexit__(*args)
 
     def __setitem__(self, item, value):
+        self.data[item] = value
         if self._cm is None:
             if self._inv:
                 asyncio.ensure_future(self.config.user_from_id(value).nation.set(item))
@@ -96,7 +110,6 @@ class Cached(MutableMapping):
                 asyncio.ensure_future(self.config.user_from_id(item).nation.set(value))
         else:
             self._cm.add(value if self._inv else item)
-        self.data[item] = value
 
     def __delitem__(self, item):
         value = self.data.pop(item)
@@ -142,7 +155,7 @@ class Citizenship(commands.Cog):
             rf'"?(?:(?:https?:\/\/)?(?:www\.)?nationstates\.net\/(?:(\w+)=)?)?([{NVALID}\s]+)"?',
             re.I,
         )
-        self.task = bot.loop.create_task(self._task())
+        self.task = asyncio.create_task(self._task())
         self.task.add_done_callback(self._callback)
         self.waiting_for = None
 
@@ -222,6 +235,31 @@ class Citizenship(commands.Cog):
             return await ctx.send_help()
         await ctx.invoke(self._identify_nation, nation=nation)
 
+    @identify.command(name="import")
+    @checks.is_owner()
+    async def _identify_import(self, ctx: Context, *, path: str):
+        """
+        Import data from V2 and help catch up from V2's downtime.
+        <path> should be a direct path to citizenships data.json.
+        This is most likely <V2 installation path>/data/citizenship/data.json.
+        """
+        try:
+            with open(path) as file:
+                servers_data = json.load(file)
+        except Exception as e:
+            return await ctx.author.send(
+                "I couldn't load your data due to an error:\n"
+                f"`{e.__class__.__name__}:{' '.join(map(str, e.args))}``"
+            )
+        nations_data = servers_data.pop("nations")
+        settings_data = servers_data.pop("settings")
+        await ctx.bot.set_shared_api_tokens("google_sheets", api_key=settings_data["KEY"])
+        for server_id, settings in servers_data.items():
+            await self.config.guild_from_id(int(server_id)).on.set(settings["on"])
+        async with self.nations:
+            for nation, user_id in nations_data.items():
+                self.nations.setdefault(int(user_id), nation)
+
     @identify.group(name="task", invoke_without_subcommand=True, autohelp=False)
     @checks.is_owner()
     async def _identify_task(self, ctx: Context, *, run: bool = False):
@@ -264,7 +302,7 @@ class Citizenship(commands.Cog):
     async def _restart_task(self, ctx: Context):
         with contextlib.suppress(Exception):
             self.task.cancel()
-        self.task = ctx.bot.loop.create_task(self._task())
+        self.task = asyncio.create_task(self._task())
         self.task.add_done_callback(self._callback)
         self.waiting_for = None
         await ctx.tick()
