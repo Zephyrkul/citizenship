@@ -3,23 +3,27 @@ import contextlib
 import io
 import json
 import logging
-import os
 import re
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from itertools import repeat, starmap
-from typing import Dict, List, MutableMapping, Optional, Set, Tuple, Union
+from typing import Dict, List, MutableMapping, Optional, Set, Union
 
 import aiohttp
 import discord
-import sans
 from backoff import expo, on_exception
 from bidict import bidict, ValueDuplicationError
 from multidict import MultiDict
 from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
 from redbot.core.commands import Context
-from redbot.core.utils.chat_formatting import box, humanize_list, humanize_timedelta, pagify
+from redbot.core.utils.chat_formatting import (
+    box,
+    humanize_list,
+    humanize_timedelta,
+    pagify,
+)
 from sans.api import Api
 
 PERIOD = 43200
@@ -73,13 +77,13 @@ class Cached(MutableMapping):
         self.data = bidict()
         for user_id, data in all_users.items():
             try:
-                self.data[user_id] = v["nation"]
+                self.data[user_id] = data["nation"]
             except ValueDuplicationError:
                 LOG.warning(
                     "User IDs %s and %s both have claimed nation %s; discarding the latter.",
-                    self.data.inv[v["nation"]],
+                    self.data.inv[data["nation"]],
                     user_id,
-                    v["nation"],
+                    data["nation"],
                 )
 
     def __getitem__(self, item):
@@ -140,7 +144,9 @@ class Cached(MutableMapping):
 class Citizenship(commands.Cog):
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=2113674295, force_registration=True)
+        self.config = Config.get_conf(
+            self, identifier=2113674295, force_registration=True
+        )
         self.config.register_guild(on=False)
         self.config.register_user(nation=None)
         self.nations = Cached(self.config)
@@ -188,7 +194,9 @@ class Citizenship(commands.Cog):
     async def initialize(self):
         await self.nations.initialize()
         all_guilds = await self.config.all_guilds()
-        self.enabled_guilds = {self.bot.get_guild(g) for g, d in all_guilds.items() if d["on"]}
+        self.enabled_guilds = {
+            self.bot.get_guild(g) for g, d in all_guilds.items() if d["on"]
+        }
         self.enabled_guilds.discard(None)
 
     async def maybe_fetch(self, user_id: int):
@@ -253,7 +261,9 @@ class Citizenship(commands.Cog):
             )
         nations_data = servers_data.pop("nations")
         settings_data = servers_data.pop("settings")
-        await ctx.bot.set_shared_api_tokens("google_sheets", api_key=settings_data["KEY"])
+        await ctx.bot.set_shared_api_tokens(
+            "google_sheets", api_key=settings_data["KEY"]
+        )
         for server_id, settings in servers_data.items():
             await self.config.guild_from_id(int(server_id)).on.set(settings["on"])
         async with self.nations:
@@ -268,7 +278,9 @@ class Citizenship(commands.Cog):
             try:
                 self.task.result()
             except Exception as e:
-                tb = "".join(traceback.format_exception(type(e), e, e.__traceback__.tb_next))
+                tb = "".join(
+                    traceback.format_exception(type(e), e, e.__traceback__.tb_next)
+                )
                 message = f"Exception {e.__class__.__name__} occurred in {self.__class__.__name__} task.\n\n{tb}"
             else:
                 # whuh? how'd we get to this line? :thonk:
@@ -293,7 +305,9 @@ class Citizenship(commands.Cog):
                 else "suspended for duration: {}".format(
                     humanize_timedelta(timedelta=wakeupat - datetime.now(timezone.utc))
                 ),
-                "\n\n".join("\n".join(frame) for frame in map(traceback.format_stack, stack)),
+                "\n\n".join(
+                    "\n".join(frame) for frame in map(traceback.format_stack, stack)
+                ),
             )
         await ctx.send_interactive(pagify(message, shorten_by=10), box_lang="py")
 
@@ -316,11 +330,19 @@ class Citizenship(commands.Cog):
         await self.set_nation(nation, ctx.author, ctx, False)
 
     async def set_nation(
-        self, nation: str, member: discord.User, ctx: Context, third_party: bool,
+        self,
+        nation: str,
+        member: discord.User,
+        ctx: Context,
+        third_party: bool,
     ):
         if not third_party:
             try:
-                cooldown = self.cooldowns[member] + timedelta(hours=1) - datetime.now(timezone.utc)
+                cooldown = (
+                    self.cooldowns[member]
+                    + timedelta(hours=1)
+                    - datetime.now(timezone.utc)
+                )
                 if cooldown.total_seconds() > 0:
                     return await ctx.send(
                         "You may only claim nations every hour. You may claim another nation in {:.0f} minutes.".format(
@@ -341,7 +363,9 @@ class Citizenship(commands.Cog):
                 return await ctx.send("Nation removed.")
             if self.nations.inv[nation] == member.id:
                 if third_party:
-                    return await ctx.send("{} has already claimed that nation.".format(member))
+                    return await ctx.send(
+                        "{} has already claimed that nation.".format(member)
+                    )
                 return await ctx.send("You already claimed that nation.")
             if not third_party:
                 return await ctx.send(
@@ -382,13 +406,16 @@ class Citizenship(commands.Cog):
             try:
                 data = await Api("region wa", nation=nation)
             except ValueError:
-                return await self.bot.send_message(ctx, "I can't find that nation. :shrug:")
+                return await ctx.send("I can't find that nation. \N{SHRUG}")
             self.nations[member.id] = nation
             self.cooldowns[member] = datetime.now(timezone.utc)
             tnp = nid(data["REGION"].text) == "the_north_pacific"
             self.cache.setdefault(nation, set()).add("residents" if tnp else "visitors")
             self.cache[nation].discard("visitors" if tnp else "residents")
-            if True in self.cache[nation] and data["UNSTATUS"].text.lower() != "non-member":
+            if (
+                True in self.cache[nation]
+                and data["UNSTATUS"].text.lower() != "non-member"
+            ):
                 self.cache[nation].add("wa residents")
             try:
                 await self._add_roles(member)
@@ -561,7 +588,9 @@ class Citizenship(commands.Cog):
     async def _task(self):
         while self is self.bot.get_cog(self.__class__.__name__):
             localcache = {"ALL": {"ex-nation"}}
-            key = (await self.bot.get_shared_api_tokens("google_sheets")).get("api_key", None)
+            key = (await self.bot.get_shared_api_tokens("google_sheets")).get(
+                "api_key", None
+            )
             if not key:
                 await self._wait_for()
                 continue
@@ -570,18 +599,22 @@ class Citizenship(commands.Cog):
             async with aiohttp.ClientSession() as session:
                 await asyncio.gather(
                     *(
-                        on_exception(expo, (aiohttp.ClientError, SheetsError), max_tries=8,)(
-                            getattr(self, attr)
-                        )(session, localcache, key)
+                        on_exception(
+                            expo,
+                            (aiohttp.ClientError, SheetsError),
+                            max_tries=8,
+                        )(getattr(self, attr))(session, localcache, key)
                         for attr in dir(self)
                         if attr.startswith("_task_")
                     )
                 )  # do it all at once
                 await asyncio.gather(
                     *(
-                        on_exception(expo, (aiohttp.ClientError, SheetsError), max_tries=8,)(
-                            getattr(self, attr)
-                        )(session, localcache, key)
+                        on_exception(
+                            expo,
+                            (aiohttp.ClientError, SheetsError),
+                            max_tries=8,
+                        )(getattr(self, attr))(session, localcache, key)
                         for attr in dir(self)
                         if attr.startswith("_sub_task_")
                     )
@@ -589,7 +622,9 @@ class Citizenship(commands.Cog):
             localcache.pop(None, None)
 
             # atomically update self.cache
-            self.cache = dict(map(lambda t: (t[0], set(map(str.lower, t[1]))), localcache.items()))
+            self.cache = dict(
+                map(lambda t: (t[0], set(map(str.lower, t[1]))), localcache.items())
+            )
             del localcache
 
             # update roles
@@ -676,7 +711,9 @@ class Citizenship(commands.Cog):
         if "error" in json:
             raise SheetsError(json["error"]["message"])
         query = MultiDict(majorDimension="rows", key=key)
-        for sheet in filter(lambda s: not s["properties"].get("hidden", False), json["sheets"]):
+        for sheet in filter(
+            lambda s: not s["properties"].get("hidden", False), json["sheets"]
+        ):
             query.add("ranges", "{}!A2:C".format(sheet["properties"]["title"]))
         async with session.get(
             "https://sheets.googleapis.com/v4/spreadsheets/"
@@ -719,7 +756,11 @@ class Citizenship(commands.Cog):
     async def _role_task(self):
         all_guilds = await self.config.all_guilds()
         for server in filter(
-            bool, map(self.bot.get_guild, filter(lambda k: all_guilds[k]["on"], all_guilds),),
+            bool,
+            map(
+                self.bot.get_guild,
+                filter(lambda k: all_guilds[k]["on"], all_guilds),
+            ),
         ):
             for i, member in enumerate(
                 filter(lambda m: not m.bot and m.id in self.nations, server.members), 1
@@ -737,8 +778,12 @@ class Citizenship(commands.Cog):
             return next(filter(lambda r: r.name.lower() == n, member.guild.roles), None)
 
         alltitles = self.cache["ALL"]
-        base = set(filter(lambda role: role.name.lower() not in alltitles, member.roles))
-        roles = base.union(map(torole, self.cache.get(self.nations[member.id], ("ex-nation",))))
+        base = set(
+            filter(lambda role: role.name.lower() not in alltitles, member.roles)
+        )
+        roles = base.union(
+            map(torole, self.cache.get(self.nations[member.id], ("ex-nation",)))
+        )
         roles.discard(None)
         if roles ^ base:
             return list(roles)
