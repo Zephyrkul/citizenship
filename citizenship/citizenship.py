@@ -25,6 +25,7 @@ from redbot.core.utils.chat_formatting import (
     pagify,
 )
 from sans.api import Api
+from sans.errors import NotFound, HTTPException, ServerError
 
 PERIOD = 43200
 NVALID = r"\-\w"
@@ -405,8 +406,10 @@ class Citizenship(commands.Cog):
         async with ctx.typing():
             try:
                 data = await Api("region wa", nation=nation)
-            except ValueError:
+            except NotFound:
                 return await ctx.send("I can't find that nation. \N{SHRUG}")
+            except HTTPException:
+                return await ctx.send("I couldn't access the API to verify your nation. \N{PENSIVE FACE}")
             self.nations[member.id] = nation
             self.cooldowns[member] = datetime.now(timezone.utc)
             tnp = nid(data["REGION"].text) == "the_north_pacific"
@@ -601,7 +604,7 @@ class Citizenship(commands.Cog):
                     *(
                         on_exception(
                             expo,
-                            (aiohttp.ClientError, SheetsError),
+                            (ServerError, aiohttp.ClientError, SheetsError),
                             max_tries=8,
                         )(getattr(self, attr))(session, localcache, key)
                         for attr in dir(self)
@@ -612,7 +615,7 @@ class Citizenship(commands.Cog):
                     *(
                         on_exception(
                             expo,
-                            (aiohttp.ClientError, SheetsError),
+                            (ServerError, aiohttp.ClientError, SheetsError),
                             max_tries=8,
                         )(getattr(self, attr))(session, localcache, key)
                         for attr in dir(self)
