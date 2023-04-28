@@ -653,14 +653,14 @@ class Citizenship(commands.Cog):
             "P": "Polls Officer",
         }
         root = await Api(
-            "nations officers delegate delegateauth founder founderauth",
+            "nations officers delegate delegateauth founder founderauth wanations",
             region="the_north_pacific",
         )
-        localcache["ALL"].update(powers.values())
-        title = "residents"
-        localcache["ALL"].add(title)
+        localcache["ALL"].update(("residents", "wa residents", *powers.values()))
         for x in re.finditer(r"[{}]+".format(NVALID), root["NATIONS"].text):
-            localcache.setdefault(x.group(0), set()).add(title)
+            localcache.setdefault(x.group(0), set()).add("residents")
+        for x in re.finditer(r"[{}]+".format(NVALID), root["UNNATIONS"].text):
+            localcache.setdefault(x.group(0), set()).add("wa residents")
         delegate, founder = root["DELEGATE"].text, root["FOUNDER"].text
         if delegate != "0":
             localcache.setdefault(delegate, set()).update(
@@ -742,19 +742,9 @@ class Citizenship(commands.Cog):
         root = await Api("nations")
         title = "visitors"
         localcache["ALL"].add(title)
+        value = {title}
         for x in re.finditer(r"[{}]+".format(NVALID), root["NATIONS"].text):
-            n = x.group(0)
-            if n not in localcache:
-                localcache[n] = set((title,))
-
-    async def _sub_task_wa(self, session, localcache, _):
-        root = await Api("members", wa="1")
-        title = "wa residents"
-        localcache["ALL"].add(title)
-        for x in re.finditer(r"[{}]+".format(NVALID), root["MEMBERS"].text):
-            n = x.group(0)
-            if n in localcache and "residents" in map(str.lower, localcache[n]):
-                localcache[n].add(title)
+            localcache.setdefault(x.group(0), value)
 
     async def _role_task(self):
         all_guilds = await self.config.all_guilds()
