@@ -21,4 +21,6 @@ async def setup(bot):
         )
     cog = Citizenship(bot)
     await cog.initialize()
-    bot.add_cog(cog)
+    maybe_coro = bot.add_cog(cog)
+    if maybe_coro:
+        await maybe_coro
