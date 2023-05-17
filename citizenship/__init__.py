@@ -17,6 +17,4 @@ async def setup(bot):
         raise CogLoadError(f"This cog requires sans version {expected} or later.")
     cog = Citizenship(bot)
     await cog.initialize()
-    maybe_coro = bot.add_cog(cog)
-    if maybe_coro:
-        await maybe_coro
+    await bot.add_cog(cog)
