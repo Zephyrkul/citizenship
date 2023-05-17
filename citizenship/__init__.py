@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from packaging import version
 
 import sans
 from redbot.core.errors import CogLoadError
@@ -11,14 +12,9 @@ with open(Path(__file__).parent / "info.json") as fp:
 
 
 async def setup(bot):
-    expected = "0.0.1b7"
-    if sans.version_info != type(sans.version_info)(expected):
-        raise CogLoadError(f"This cog requires sans version {expected}.")
-    await bot.wait_until_ready()
-    if bot.user.id not in (743870009826083017, 488781401567526915, 256505473807679488):
-        raise CogLoadError(
-            "I don't know how you found this cog, but it isn't meant for your bot."
-        )
+    expected = "1.1.2"
+    if version.parse(sans.__version__) < version.parse(expected):
+        raise CogLoadError(f"This cog requires sans version {expected} or later.")
     cog = Citizenship(bot)
     await cog.initialize()
     maybe_coro = bot.add_cog(cog)

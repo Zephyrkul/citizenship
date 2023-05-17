@@ -2,5 +2,8 @@
     "author": [
         "Zephyrkul#1089"
     ],
-    "end_user_data_statement": "This cog stores user-provided NationStates nations and information associated with those nations. No other EUD is persistently stored."
+    "end_user_data_statement": "This cog stores user-provided NationStates nations and information associated with those nations. No other EUD is persistently stored.",
+    "requirements": [
+        "sans"
+    ]
 }

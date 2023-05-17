@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from itertools import repeat, starmap
 from typing import Dict, List, MutableMapping, Optional, Set, Union
 
-import aiohttp
 import discord
 from backoff import expo, on_exception
 from bidict import bidict, ValueDuplicationError
@@ -24,12 +23,10 @@ from redbot.core.utils.chat_formatting import (
     humanize_timedelta,
     pagify,
 )
-from sans.api import Api
-from sans.errors import NotFound, HTTPException, ServerError
+import sans
 
 PERIOD = 43200
 NVALID = r"\-\w"
-LAST_MAGICALITY_SNOWFLAKE = 735393592775802900
 LOG = logging.getLogger("red.fluffy.citizenship")
 
 
@@ -62,7 +59,7 @@ class Default(dict):
 
 
 class Cached(MutableMapping):
-    """ this is a terrbile idea, don't ever do it """
+    """this is a terrbile idea, don't ever do it"""
 
     def __init__(self, config: Config, *, inv_from=None):
         self.data = None if inv_from is None else inv_from.data.inv
@@ -409,7 +406,9 @@ class Citizenship(commands.Cog):
             except NotFound:
                 return await ctx.send("I can't find that nation. \N{SHRUG}")
             except HTTPException:
-                return await ctx.send("I couldn't access the API to verify your nation. \N{PENSIVE FACE}")
+                return await ctx.send(
+                    "I couldn't access the API to verify your nation. \N{PENSIVE FACE}"
+                )
             self.nations[member.id] = nation
             self.cooldowns[member] = datetime.now(timezone.utc)
             tnp = nid(data["REGION"].text) == "the_north_pacific"
@@ -484,7 +483,6 @@ class Citizenship(commands.Cog):
     @checks.admin_or_permissions(manage_guild=True)
     async def _set_toggle(self, ctx, *, true_false: bool = None):
         """Toggle autoroles on this server."""
-        server = ctx.guild
         if true_false is not None:
             await self.config.guild(ctx.guild).on.set(true_false)
         else:
@@ -590,7 +588,7 @@ class Citizenship(commands.Cog):
 
     async def _task(self):
         while self is self.bot.get_cog(self.__class__.__name__):
-            localcache = {"ALL": {"ex-nation"}}
+            localcache: Dict[Optional[str], Set[str]] = {"ALL": {"ex-nation"}}
             key = (await self.bot.get_shared_api_tokens("google_sheets")).get(
                 "api_key", None
             )
@@ -599,25 +597,21 @@ class Citizenship(commands.Cog):
                 continue
 
             # get new cache by abusing dict mutability
-            async with aiohttp.ClientSession() as session:
+            async with sans.AsyncClient() as client:
                 await asyncio.gather(
                     *(
-                        on_exception(
-                            expo,
-                            (ServerError, aiohttp.ClientError, SheetsError),
-                            max_tries=8,
-                        )(getattr(self, attr))(session, localcache, key)
+                        on_exception(expo, (SheetsError,), max_tries=8)(
+                            getattr(self, attr)
+                        )(client, localcache, key)
                         for attr in dir(self)
                         if attr.startswith("_task_")
                     )
                 )  # do it all at once
                 await asyncio.gather(
                     *(
-                        on_exception(
-                            expo,
-                            (ServerError, aiohttp.ClientError, SheetsError),
-                            max_tries=8,
-                        )(getattr(self, attr))(session, localcache, key)
+                        on_exception(expo, (SheetsError,), max_tries=8)(
+                            getattr(self, attr)
+                        )(client, localcache, key)
                         for attr in dir(self)
                         if attr.startswith("_sub_task_")
                     )
@@ -638,13 +632,16 @@ class Citizenship(commands.Cog):
             timetil = PERIOD - (t.timestamp() % PERIOD)
             if timetil < PERIOD / 4:
                 timetil += PERIOD
-            wakeupat = t + timedelta(seconds=timetil)
+            wakeupat = t + timedelta(seconds=timetil)  # noqa: F841
             await self._wait_for(asyncio.sleep(timetil))
             del wakeupat
 
-    async def _task_region(self, session, localcache, _):
+    async def _task_region(
+        self, client: sans.AsyncClientType, localcache: Dict[Optional[str], Set[str]], _
+    ):
         powers = {
             "X": "Executive Officer",
+            "S": "Successor",
             "W": "World Assembly Officer",
             "A": "Appearance Officer",
             "B": "Border Control Officer",
@@ -652,37 +649,43 @@ class Citizenship(commands.Cog):
             "E": "Embassies Officer",
             "P": "Polls Officer",
         }
-        root = await Api(
-            "nations officers delegate delegateauth founder founderauth wanations",
-            region="the_north_pacific",
-        )
+        root = (
+            await client.get(
+                sans.Region(
+                    "the_north_pacific",
+                    "nations officers delegate delegateauth wanations",
+                )
+            )
+        ).xml
         localcache["ALL"].update(("residents", "wa residents", *powers.values()))
-        for x in re.finditer(r"[{}]+".format(NVALID), root["NATIONS"].text):
+        for x in re.finditer(rf"[{NVALID}]+", root.find("NATIONS").text):
             localcache.setdefault(x.group(0), set()).add("residents")
-        for x in re.finditer(r"[{}]+".format(NVALID), root["UNNATIONS"].text):
+        for x in re.finditer(rf"[{NVALID}]+", root.find("UNNATIONS").text):
             localcache.setdefault(x.group(0), set()).add("wa residents")
-        delegate, founder = root["DELEGATE"].text, root["FOUNDER"].text
+        delegate = root.find("DELEGATE").text
         if delegate != "0":
             localcache.setdefault(delegate, set()).update(
                 map(powers.__getitem__, root.find("DELEGATEAUTH").text)
             )
-        if founder != "0":
-            localcache.setdefault(founder, set()).update(
-                map(powers.__getitem__, root.find("FOUNDERAUTH").text)
-            )
-        officers = root["OFFICERS"].findall("OFFICER")
-        for officer in officers:
+        for officer in root.findall("OFFICERS/OFFICER"):
             localcache.setdefault(officer.find("NATION").text, set()).update(
                 map(powers.__getitem__, officer.find("AUTHORITY").text)
             )
 
-    async def _task_citizenship(self, session, localcache, key):
-        async with session.get(
-            "https://sheets.googleapis.com/v4/spreadsheets/"
-            "1aQ9EplmCzZLz7AmWQwpSXiCPo60AdyGG97PR1lD2tWM/values/Citizens!D3:D",
-            params={"majorDimension": "columns", "key": key},
-        ) as response:
-            json = await response.json()
+    async def _task_citizenship(
+        self,
+        client: sans.AsyncClientType,
+        localcache: Dict[Optional[str], Set[str]],
+        key: str,
+    ):
+        json = (
+            await client.get(
+                "https://sheets.googleapis.com/v4/spreadsheets/"
+                "1aQ9EplmCzZLz7AmWQwpSXiCPo60AdyGG97PR1lD2tWM/values/Citizens!D3:D",
+                auth=None,
+                params={"majorDimension": "columns", "key": key},
+            )
+        ).json()
         if "error" in json:
             raise SheetsError(json["error"]["message"])
         title = json["range"].split("!")[0].strip("'").replace("''", "'")
@@ -690,13 +693,20 @@ class Citizenship(commands.Cog):
         for nation in map(nid, json["values"][0]):
             localcache.setdefault(nation, set()).add(title)
 
-    async def _task_army(self, session, localcache, key):
-        async with session.get(
-            "https://sheets.googleapis.com/v4/spreadsheets/"
-            "12l7zoYXrV7L_5uXM5HeVoe93ZBU70ypYf3jS1I0TZuE/values/Roster!B4:B",
-            params={"majorDimension": "columns", "key": key},
-        ) as response:
-            json = await response.json()
+    async def _task_army(
+        self,
+        client: sans.AsyncClientType,
+        localcache: Dict[Optional[str], Set[str]],
+        key: str,
+    ):
+        json = (
+            await client.get(
+                "https://sheets.googleapis.com/v4/spreadsheets/"
+                "12l7zoYXrV7L_5uXM5HeVoe93ZBU70ypYf3jS1I0TZuE/values/Roster!B4:B",
+                auth=None,
+                params={"majorDimension": "columns", "key": key},
+            )
+        ).json()
         if "error" in json:
             raise SheetsError(json["error"]["message"])
         title = "NPA Soldiers"
@@ -704,13 +714,20 @@ class Citizenship(commands.Cog):
         for nation in map(nid, json["values"][0]):
             localcache.setdefault(nation, set()).add(title)
 
-    async def _task_government(self, session, localcache, key):
-        async with session.get(
-            "https://sheets.googleapis.com/v4/spreadsheets/"
-            "1hBUA7i7n5-0RXNbItLDHA1lb_D9rKQp4JJ1hc5InD8k/",
-            params={"key": key},
-        ) as response:
-            json = await response.json()
+    async def _task_government(
+        self,
+        client: sans.AsyncClientType,
+        localcache: Dict[Optional[str], Set[str]],
+        key: str,
+    ):
+        json = (
+            await client.get(
+                "https://sheets.googleapis.com/v4/spreadsheets/"
+                "1hBUA7i7n5-0RXNbItLDHA1lb_D9rKQp4JJ1hc5InD8k/",
+                auth=None,
+                params={"key": key},
+            )
+        ).json()
         if "error" in json:
             raise SheetsError(json["error"]["message"])
         query = MultiDict(majorDimension="rows", key=key)
@@ -718,12 +735,14 @@ class Citizenship(commands.Cog):
             lambda s: not s["properties"].get("hidden", False), json["sheets"]
         ):
             query.add("ranges", "{}!A2:C".format(sheet["properties"]["title"]))
-        async with session.get(
-            "https://sheets.googleapis.com/v4/spreadsheets/"
-            "1hBUA7i7n5-0RXNbItLDHA1lb_D9rKQp4JJ1hc5InD8k/values:batchGet/",
-            params=query,
-        ) as response:
-            json = await response.json()
+        json = (
+            await client.get(
+                "https://sheets.googleapis.com/v4/spreadsheets/"
+                "1hBUA7i7n5-0RXNbItLDHA1lb_D9rKQp4JJ1hc5InD8k/values:batchGet/",
+                auth=None,
+                params=query,
+            )
+        ).json()
         if "error" in json:
             raise SheetsError(json["error"]["message"])
         for ranges in json["valueRanges"]:
@@ -738,36 +757,39 @@ class Citizenship(commands.Cog):
                 if title.lower() == "delegate":
                     executive = True
 
-    async def _sub_task_world(self, session, localcache, _):
-        root = await Api("nations")
+    async def _sub_task_world(
+        self,
+        client: sans.AsyncClientType,
+        localcache: Dict[Optional[str], Set[str]],
+        _: str,
+    ):
+        root = (await client.get(sans.World("nations"))).xml
         title = "visitors"
         localcache["ALL"].add(title)
-        value = {title}
-        for x in re.finditer(r"[{}]+".format(NVALID), root["NATIONS"].text):
-            localcache.setdefault(x.group(0), value)
+        for x in re.finditer(r"[{}]+".format(NVALID), root.find("NATIONS").text):
+            localcache.setdefault(x.group(0), {title})
 
     async def _role_task(self):
         all_guilds = await self.config.all_guilds()
         for server in filter(
-            bool,
+            None,
             map(
                 self.bot.get_guild,
                 filter(lambda k: all_guilds[k]["on"], all_guilds),
             ),
         ):
-            for i, member in enumerate(
-                filter(lambda m: not m.bot and m.id in self.nations, server.members), 1
+            for member in filter(
+                lambda m: not m.bot and m.id in self.nations, server.members
             ):
                 roles = self._role_set(member)
                 if roles:
                     await member.edit(
                         roles=roles, reason=f"{self.__class__.__name__} autorole task"
                     )
-                if not i % 10:
-                    await asyncio.sleep(0.1)  # yield to other tasks
+                await asyncio.sleep(0)  # yield to other tasks
 
-    def _role_set(self, member) -> Optional[List[discord.Role]]:
-        def torole(n):
+    def _role_set(self, member: discord.Member) -> Optional[List[discord.Role]]:
+        def torole(n) -> Optional[discord.Role]:
             return next(filter(lambda r: r.name.lower() == n, member.guild.roles), None)
 
         alltitles = self.cache["ALL"]
@@ -779,5 +801,5 @@ class Citizenship(commands.Cog):
         )
         roles.discard(None)
         if roles ^ base:
-            return list(roles)
+            return list(roles)  # type: ignore
         return None
