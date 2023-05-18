@@ -12,7 +12,7 @@ with open(Path(__file__).parent / "info.json") as fp:
 
 
 async def setup(bot):
-    expected = "1.1.2"
+    expected = "1.1.3dev0"
     if version.parse(sans.__version__) < version.parse(expected):
         raise CogLoadError(f"This cog requires sans version {expected} or later.")
     cog = Citizenship(bot)

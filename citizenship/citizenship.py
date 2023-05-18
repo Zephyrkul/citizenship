@@ -1,10 +1,8 @@
 import asyncio
 import contextlib
 import io
-import json
 import logging
 import re
-import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from itertools import repeat, starmap
@@ -14,9 +12,8 @@ import discord
 from backoff import expo, on_exception
 from bidict import bidict, ValueDuplicationError
 from multidict import MultiDict
-from redbot.core import Config, checks, commands
+from redbot.core import Config, commands
 from redbot.core.bot import Red
-from redbot.core.commands import Context
 from redbot.core.utils.chat_formatting import (
     box,
     humanize_list,
@@ -121,7 +118,7 @@ class Cached(MutableMapping):
             else:
                 asyncio.ensure_future(self.config.user_from_id(item).nation.clear())
         else:
-            self._cm_del.add(value if self._inv else item)
+            raise NotImplementedError
 
     def __iter__(self):
         return iter(self.data)
@@ -148,6 +145,7 @@ class Citizenship(commands.Cog):
         self.config.register_guild(on=False)
         self.config.register_user(nation=None)
         self.nations = Cached(self.config)
+        self.client = sans.AsyncClient()
         self.cache: Dict[str, Set[str]] = {}
         self.cooldowns: Dict[discord.User, datetime] = {}
         self.enabled_guilds: Set[discord.Guild] = set()
@@ -162,6 +160,11 @@ class Citizenship(commands.Cog):
         self.task = asyncio.create_task(self._task())
         self.task.add_done_callback(self._callback)
         self.waiting_for = None
+
+    async def _get_as_xml(self, *shards: str, **parameters: str):
+        response = await self.client.get(sans.World(*shards, **parameters))
+        response.raise_for_status()
+        return response.xml
 
     def _callback(self, fut: asyncio.Future):
         try:
@@ -235,43 +238,26 @@ class Citizenship(commands.Cog):
                     )
 
     @commands.group(invoke_without_command=True, autohelp=False)
-    async def identify(self, ctx: Context, *, nation=None):
+    async def identify(self, ctx: commands.Context, *, nation=None):
         """Configure or view the nations associated with yourself or others."""
         if ctx.invoked_subcommand is None and nation is None:
             return await ctx.send_help()
         await ctx.invoke(self._identify_nation, nation=nation)
 
-    @identify.command(name="import")
-    @checks.is_owner()
-    async def _identify_import(self, ctx: Context, *, path: str):
+    @identify.group(name="task", autohelp=False)
+    @commands.is_owner()
+    async def _identify_task(self, ctx: commands.Context):
         """
-        Import data from V2 and help catch up from V2's downtime.
-        <path> should be a direct path to citizenships data.json.
-        This is most likely <V2 installation path>/data/citizenship/data.json.
-        """
-        try:
-            with open(path) as file:
-                servers_data = json.load(file)
-        except Exception as e:
-            return await ctx.author.send(
-                "I couldn't load your data due to an error:\n"
-                f"`{e.__class__.__name__}:{' '.join(map(str, e.args))}``"
-            )
-        nations_data = servers_data.pop("nations")
-        settings_data = servers_data.pop("settings")
-        await ctx.bot.set_shared_api_tokens(
-            "google_sheets", api_key=settings_data["KEY"]
-        )
-        for server_id, settings in servers_data.items():
-            await self.config.guild_from_id(int(server_id)).on.set(settings["on"])
-        async with self.nations:
-            for nation, user_id in nations_data.items():
-                self.nations.setdefault(int(user_id), nation)
+        View the status of the underlying task.
 
-    @identify.group(name="task", invoke_without_subcommand=True, autohelp=False)
-    @checks.is_owner()
-    async def _identify_task(self, ctx: Context, *, run: bool = False):
-        """View the status of the autorole task."""
+        Managing the task may be accomplished using the subcommands below.
+        """
+        if ctx.invoked_subcommand == self._restart_task:
+            self.task.cancel()
+            self.task = asyncio.create_task(self._task())
+            self.task.add_done_callback(self._callback)
+            self.waiting_for = None
+            await asyncio.sleep(0.1)  # yield to show success
         if self.task.done():
             try:
                 self.task.result()
@@ -286,7 +272,7 @@ class Citizenship(commands.Cog):
                     "Somehow an infinite loop finished. This should never ever happen."
                 )
         else:
-            if run:
+            if ctx.invoked_subcommand == self._continue_task:
                 if self._waiting():
                     self.waiting_for.cancel()
                     await asyncio.sleep(0.1)  # yield to show success
@@ -301,7 +287,7 @@ class Citizenship(commands.Cog):
                 else "suspended until resumed"
                 if wakeupat is None
                 else "suspended for duration: {}".format(
-                    humanize_timedelta(timedelta=wakeupat - datetime.now(timezone.utc))
+                    humanize_timedelta(timedelta=wakeupat - ctx.message.created_at)
                 ),
                 "\n\n".join(
                     "\n".join(frame) for frame in map(traceback.format_stack, stack)
@@ -310,17 +296,25 @@ class Citizenship(commands.Cog):
         await ctx.send_interactive(pagify(message, shorten_by=10), box_lang="py")
 
     @_identify_task.command(name="restart")
-    @checks.is_owner()
-    async def _restart_task(self, ctx: Context):
-        with contextlib.suppress(Exception):
-            self.task.cancel()
-        self.task = asyncio.create_task(self._task())
-        self.task.add_done_callback(self._callback)
-        self.waiting_for = None
-        await ctx.tick()
+    @commands.is_owner()
+    async def _restart_task(self, ctx: commands.Context):
+        """
+        Instruct the underlying task to exit and start again from the beginning.
+
+        Generally used when the task errored out.
+        """
+
+    @_identify_task.command(name="continue")
+    @commands.is_owner()
+    async def _continue_task(self, ctx: commands.Context):
+        """
+        Instruct the underlying task to continue from where it left off.
+
+        Generally used when the task is running correctly, but needs to be ran again.
+        """
 
     @identify.command(name="nation", pass_context=True)
-    async def _identify_nation(self, ctx: Context, *, nation):
+    async def _identify_nation(self, ctx: commands.Context, *, nation):
         """Associate your nation with your account.
 
         Note that you may only add one nation every hour,
@@ -331,7 +325,7 @@ class Citizenship(commands.Cog):
         self,
         nation: str,
         member: discord.User,
-        ctx: Context,
+        ctx: commands.Context,
         third_party: bool,
     ):
         if not third_party:
@@ -402,21 +396,21 @@ class Citizenship(commands.Cog):
                 return await ctx.send("Okay, I haven't changed your nation.")
         async with ctx.typing():
             try:
-                data = await Api("region wa", nation=nation)
-            except NotFound:
+                data = await self._get_as_xml("region wa", nation=nation)
+            except sans.NotFound:
                 return await ctx.send("I can't find that nation. \N{SHRUG}")
-            except HTTPException:
+            except sans.HTTPStatusError:
                 return await ctx.send(
                     "I couldn't access the API to verify your nation. \N{PENSIVE FACE}"
                 )
             self.nations[member.id] = nation
             self.cooldowns[member] = datetime.now(timezone.utc)
-            tnp = nid(data["REGION"].text) == "the_north_pacific"
+            tnp = nid(data.find("REGION").text) == "the_north_pacific"
             self.cache.setdefault(nation, set()).add("residents" if tnp else "visitors")
             self.cache[nation].discard("visitors" if tnp else "residents")
             if (
                 True in self.cache[nation]
-                and data["UNSTATUS"].text.lower() != "non-member"
+                and data.find("UNSTATUS").text.lower() != "non-member"
             ):
                 self.cache[nation].add("wa residents")
             try:
@@ -471,7 +465,7 @@ class Citizenship(commands.Cog):
             await ctx.send("{} is not in my data.".format(member))
 
     @identify.group(name="set", invoke_without_command=True)
-    @checks.admin_or_permissions(manage_roles=True)
+    @commands.admin_or_permissions(manage_roles=True)
     async def _identify_set(self, ctx, nation, *, member: discord.Member = None):
         """Set various options.
 
@@ -479,8 +473,8 @@ class Citizenship(commands.Cog):
         or remove that nation from an account if no member is specified."""
         await self.set_nation(nation, member, ctx, ctx.message.author != member)
 
-    @_identify_set.command(name="toggle", no_pm=True)
-    @checks.admin_or_permissions(manage_guild=True)
+    @_identify_set.command(name="toggle")
+    @commands.admin_or_permissions(manage_guild=True)
     async def _set_toggle(self, ctx, *, true_false: bool = None):
         """Toggle autoroles on this server."""
         if true_false is not None:
@@ -542,20 +536,9 @@ class Citizenship(commands.Cog):
         answer = await self.bot.wait_for("message", check=check)
         await self.set_nation(nation, member, answer.channel, False)
 
-    def __unload(self):
-        with contextlib.suppress(Exception):
-            self.task.cancel()
-
-    cog_unload = __unload
-    __del__ = __unload
-
-    @identify.before_invoke
-    async def _before_invoke(self, ctx):
-        if ctx.cog is not self:
-            return
-        xra = Api.xra
-        if xra:
-            raise commands.CommandOnCooldown(None, time.time() - xra)
+    async def cog_unload(self):
+        self.task.cancel()
+        await self.client.aclose()
 
     async def _add_roles(self, user: discord.abc.User, *, as_user=True):
         if user.bot or user.id not in self.nations:
@@ -593,29 +576,28 @@ class Citizenship(commands.Cog):
                 "api_key", None
             )
             if not key:
-                await self._wait_for()
+                await self._wait_for()  # Please set your google_sheets API key
                 continue
 
             # get new cache by abusing dict mutability
-            async with sans.AsyncClient() as client:
-                await asyncio.gather(
-                    *(
-                        on_exception(expo, (SheetsError,), max_tries=8)(
-                            getattr(self, attr)
-                        )(client, localcache, key)
-                        for attr in dir(self)
-                        if attr.startswith("_task_")
-                    )
-                )  # do it all at once
-                await asyncio.gather(
-                    *(
-                        on_exception(expo, (SheetsError,), max_tries=8)(
-                            getattr(self, attr)
-                        )(client, localcache, key)
-                        for attr in dir(self)
-                        if attr.startswith("_sub_task_")
-                    )
+            await asyncio.gather(
+                *(
+                    on_exception(expo, (SheetsError,), max_tries=8)(
+                        getattr(self, attr)
+                    )(localcache, key)
+                    for attr in dir(self)
+                    if attr.startswith("_task_")
                 )
+            )  # do it all at once
+            await asyncio.gather(
+                *(
+                    on_exception(expo, (SheetsError,), max_tries=8)(
+                        getattr(self, attr)
+                    )(localcache, key)
+                    for attr in dir(self)
+                    if attr.startswith("_sub_task_")
+                )
+            )
             localcache.pop(None, None)
 
             # atomically update self.cache
@@ -636,9 +618,7 @@ class Citizenship(commands.Cog):
             await self._wait_for(asyncio.sleep(timetil))
             del wakeupat
 
-    async def _task_region(
-        self, client: sans.AsyncClientType, localcache: Dict[Optional[str], Set[str]], _
-    ):
+    async def _task_region(self, localcache: Dict[Optional[str], Set[str]], _):
         powers = {
             "X": "Executive Officer",
             "S": "Successor",
@@ -649,14 +629,10 @@ class Citizenship(commands.Cog):
             "E": "Embassies Officer",
             "P": "Polls Officer",
         }
-        root = (
-            await client.get(
-                sans.Region(
-                    "the_north_pacific",
-                    "nations officers delegate delegateauth wanations",
-                )
-            )
-        ).xml
+        root = await self._get_as_xml(
+            "nations officers delegate delegateauth wanations",
+            region="the_north_pacific",
+        )
         localcache["ALL"].update(("residents", "wa residents", *powers.values()))
         for x in re.finditer(rf"[{NVALID}]+", root.find("NATIONS").text):
             localcache.setdefault(x.group(0), set()).add("residents")
@@ -674,12 +650,11 @@ class Citizenship(commands.Cog):
 
     async def _task_citizenship(
         self,
-        client: sans.AsyncClientType,
         localcache: Dict[Optional[str], Set[str]],
         key: str,
     ):
         json = (
-            await client.get(
+            await self.client.get(
                 "https://sheets.googleapis.com/v4/spreadsheets/"
                 "1aQ9EplmCzZLz7AmWQwpSXiCPo60AdyGG97PR1lD2tWM/values/Citizens!D3:D",
                 auth=None,
@@ -695,12 +670,11 @@ class Citizenship(commands.Cog):
 
     async def _task_army(
         self,
-        client: sans.AsyncClientType,
         localcache: Dict[Optional[str], Set[str]],
         key: str,
     ):
         json = (
-            await client.get(
+            await self.client.get(
                 "https://sheets.googleapis.com/v4/spreadsheets/"
                 "12l7zoYXrV7L_5uXM5HeVoe93ZBU70ypYf3jS1I0TZuE/values/Roster!B4:B",
                 auth=None,
@@ -716,12 +690,11 @@ class Citizenship(commands.Cog):
 
     async def _task_government(
         self,
-        client: sans.AsyncClientType,
         localcache: Dict[Optional[str], Set[str]],
         key: str,
     ):
         json = (
-            await client.get(
+            await self.client.get(
                 "https://sheets.googleapis.com/v4/spreadsheets/"
                 "1hBUA7i7n5-0RXNbItLDHA1lb_D9rKQp4JJ1hc5InD8k/",
                 auth=None,
@@ -736,7 +709,7 @@ class Citizenship(commands.Cog):
         ):
             query.add("ranges", "{}!A2:C".format(sheet["properties"]["title"]))
         json = (
-            await client.get(
+            await self.client.get(
                 "https://sheets.googleapis.com/v4/spreadsheets/"
                 "1hBUA7i7n5-0RXNbItLDHA1lb_D9rKQp4JJ1hc5InD8k/values:batchGet/",
                 auth=None,
@@ -759,11 +732,10 @@ class Citizenship(commands.Cog):
 
     async def _sub_task_world(
         self,
-        client: sans.AsyncClientType,
         localcache: Dict[Optional[str], Set[str]],
         _: str,
     ):
-        root = (await client.get(sans.World("nations"))).xml
+        root = await self._get_as_xml("nations")
         title = "visitors"
         localcache["ALL"].add(title)
         for x in re.finditer(r"[{}]+".format(NVALID), root.find("NATIONS").text):

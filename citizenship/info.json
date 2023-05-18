@@ -4,6 +4,8 @@
     ],
     "end_user_data_statement": "This cog stores user-provided NationStates nations and information associated with those nations. No other EUD is persistently stored.",
     "requirements": [
+        "backoff",
+        "bidict",
         "sans"
     ]
 }
